@@ -1,149 +1,153 @@
 #!/usr/bin/env python3
-import argparse, bz2, csv
+import argparse, bz2, csv, os, ast
 
 def open_file(p):
     return bz2.open(p, "rt") if p.endswith(".bz2") else open(p)
 
 def norm(x):
     x = x.strip()
-    if x.startswith("@") or x.startswith(">"): x = x[1:]
+    if x.startswith("@") or x.startswith(">"):
+        x = x[1:]
     x = x.split()[0]
     x = x.split("__")[0]
-    if x.endswith("/1") or x.endswith("/2"): x = x[:-2]
+    if x.endswith("/1") or x.endswith("/2"):
+        x = x[:-2]
     return x
 
 def lineage(t, tax):
-    L = []
-    while t and t != "0":
-        L.append(t)
-        t = tax.get(t, {}).get("parent")
-    return list(reversed(L))
+    out = []
+    seen = set()
+    while t and t != "0" and t not in seen:
+        seen.add(t)
+        out.append(t)
+        t = tax.get(t, {}).get("parent", "")
+    return list(reversed(out))
 
-def lca(a,b,tax):
-    A,B = lineage(a,tax), lineage(b,tax)
-    out="0"
-    for x,y in zip(A,B):
-        if x==y: out=x
-        else: break
-    return out
+def lca(a, b, tax):
+    A, B = lineage(a, tax), lineage(b, tax)
+    x = "0"
+    for i, j in zip(A, B):
+        if i == j:
+            x = i
+        else:
+            break
+    return x
 
-# ---------- load data ----------
+ap = argparse.ArgumentParser()
+ap.add_argument("--kraken_perread", required=True)
+ap.add_argument("--metaphlan_bowtie2", required=True)
+ap.add_argument("--metaphlan_profile", required=True)
+ap.add_argument("--marker_info", required=True)
+ap.add_argument("--ktaxonomy", required=True)
+ap.add_argument("--out", required=True)
+args = ap.parse_args()
 
-def load_tax(path):
-    d={}
-    for l in open(path):
-        p=l.strip().split("\t")
-        if len(p)>=4:
-            d[p[0]]={"parent":p[1],"rank":p[2],"name":p[3]}
-    return d
+for p in [args.kraken_perread, args.metaphlan_bowtie2, args.metaphlan_profile, args.marker_info, args.ktaxonomy]:
+    if not os.path.exists(p):
+        raise FileNotFoundError(p)
 
-def load_profile(path):
-    # clade -> taxid
-    m={}
-    for l in open(path):
-        if l.startswith("#"): continue
-        p=l.strip().split("\t")
-        if len(p)<2 or p[0]=="clade_name": continue
-        m[p[0]] = p[1].split("|")[-1]
-    return m
+# kraken taxonomy
+tax = {}
+with open(args.ktaxonomy) as fh:
+    for l in fh:
+        p = l.rstrip("\n").split("\t")
+        if len(p) >= 4:
+            taxid, parent, rank, name = p[0], p[1], p[2], p[3]
+            tax[taxid] = {"parent": parent, "rank": rank, "name": name}
 
-def load_marker_info(path):
-    # marker -> clade string (simple heuristic)
-    m={}
-    for l in open_file(path):
-        p=l.strip().split("\t")
-        if not p: continue
-        marker=p[0]
-        for x in p[1:]:
-            if "k__" in x or "d__" in x:
-                m[marker]=x
-                break
-    return m
+# metaphlan profile: full clade_name -> last numeric taxid in NCBI_tax_id column
+clade2taxid = {}
+with open(args.metaphlan_profile) as fh:
+    for l in fh:
+        if l.startswith("#"):
+            continue
+        p = l.rstrip("\n").split("\t")
+        if len(p) >= 2 and p[0] != "clade_name":
+            clade2taxid[p[0]] = p[1].split("|")[-1]
 
-def load_metaphlan(path):
-    # read -> marker
-    m={}
-    for l in open_file(path):
-        if l.startswith("@"): continue
-        p=l.strip().split("\t")
-        if len(p)>=11:
-            rid,marker=p[0],p[2]
-        elif len(p)>=2:
-            rid,marker=p[0],p[1]
+# marker_info: marker -> full lineage string from dict["taxon"]
+marker2clade = {}
+with open_file(args.marker_info) as fh:
+    for l in fh:
+        p = l.rstrip("\n").split("\t", 1)
+        if len(p) < 2:
+            continue
+        marker, info = p[0], p[1]
+        try:
+            d = ast.literal_eval(info)
+            clade = d.get("taxon", "")
+            if clade:
+                marker2clade[marker] = clade
+        except Exception:
+            pass
+
+# bowtie2out: read -> marker
+read2marker = {}
+with open_file(args.metaphlan_bowtie2) as fh:
+    for l in fh:
+        if l.startswith("@"):
+            continue
+        p = l.rstrip("\n").split("\t")
+        if len(p) >= 11:
+            rid, marker = p[0], p[2]
+        elif len(p) >= 2:
+            rid, marker = p[0], p[1]
         else:
             continue
-        rid=norm(rid)
-        if rid not in m:
-            m[rid]=marker
-    return m
+        rid = norm(rid)
+        if rid not in read2marker:
+            read2marker[rid] = marker
 
-# ---------- main ----------
-
-def main():
-    ap=argparse.ArgumentParser()
-    ap.add_argument("--kraken_perread",required=True)
-    ap.add_argument("--metaphlan_bowtie2",required=True)
-    ap.add_argument("--metaphlan_profile",required=True)
-    ap.add_argument("--marker_info",required=True)
-    ap.add_argument("--ktaxonomy",required=True)
-    ap.add_argument("--out",required=True)
-    args=ap.parse_args()
-
-    tax = load_tax(args.ktaxonomy)
-    prof = load_profile(args.metaphlan_profile)
-    marker2clade = load_marker_info(args.marker_info)
-    read2marker = load_metaphlan(args.metaphlan_bowtie2)
-
-    out=open(args.out,"w")
-    w=csv.writer(out,delimiter="\t")
-
+with open(args.out, "w", newline="") as out:
+    w = csv.writer(out, delimiter="\t")
     w.writerow([
         "read_id",
-        "kraken_taxid","kraken_rank","kraken_name",
-        "meta_hit","meta_taxid",
-        "final_taxid","final_rank","final_name","reason"
+        "kraken_taxid", "kraken_rank", "kraken_name",
+        "meta_hit", "meta_taxid",
+        "final_taxid", "final_rank", "final_name", "reason"
     ])
 
-    for l in open(args.kraken_perread):
-        p=l.strip().split("\t")
-        if len(p)<3: continue
+    with open(args.kraken_perread) as fh:
+        for l in fh:
+            p = l.rstrip("\n").split("\t")
+            if len(p) < 3:
+                continue
 
-        status, rid, ktaxid = p[0], p[1], p[2]
-        if status=="U": ktaxid="0"
+            status, rid, ktaxid = p[0], p[1], p[2]
+            if status == "U":
+                ktaxid = "0"
 
-        kr_rank = tax.get(ktaxid,{}).get("rank","unclassified")
-        kr_name = tax.get(ktaxid,{}).get("name","unclassified")
+            kr_rank = tax.get(ktaxid, {}).get("rank", "unclassified")
+            kr_name = tax.get(ktaxid, {}).get("name", "unclassified")
 
-        ridn = norm(rid)
+            ridn = norm(rid)
+            meta_taxid = ""
 
-        meta_taxid=""
-        if ridn in read2marker:
-            marker = read2marker[ridn]
-            clade  = marker2clade.get(marker,"")
-            meta_taxid = prof.get(clade,"")
+            if ridn in read2marker:
+                marker = read2marker[ridn]
+                clade = marker2clade.get(marker, "")
+                meta_taxid = clade2taxid.get(clade, "")
 
-        # ---------- reconciliation ----------
-        if not meta_taxid:
-            final = ktaxid
-            reason = "no_meta"
-        else:
-            if meta_taxid in lineage(ktaxid,tax) or ktaxid in lineage(meta_taxid,tax):
-                # same lineage → deeper
-                final = ktaxid if len(lineage(ktaxid,tax))>=len(lineage(meta_taxid,tax)) else meta_taxid
-                reason = "same_lineage"
+            if not meta_taxid:
+                final = ktaxid
+                reason = "no_meta"
             else:
-                final = lca(ktaxid,meta_taxid,tax)
-                reason = "lca"
+                if meta_taxid in lineage(ktaxid, tax) or ktaxid in lineage(meta_taxid, tax):
+                    if len(lineage(ktaxid, tax)) >= len(lineage(meta_taxid, tax)):
+                        final = ktaxid
+                    else:
+                        final = meta_taxid
+                    reason = "same_lineage"
+                else:
+                    final = lca(ktaxid, meta_taxid, tax)
+                    reason = "lca"
 
-        fr = tax.get(final,{}).get("rank","unclassified")
-        fn = tax.get(final,{}).get("name","unclassified")
+            fr = tax.get(final, {}).get("rank", "unclassified")
+            fn = tax.get(final, {}).get("name", "unclassified")
 
-        w.writerow([rid, ktaxid, kr_rank, kr_name,
-                    "yes" if meta_taxid else "no", meta_taxid,
-                    final, fr, fn, reason])
-
-    out.close()
-
-
-if __name__=="__main__":
-    main()
+            w.writerow([
+                rid,
+                ktaxid, kr_rank, kr_name,
+                "yes" if meta_taxid else "no", meta_taxid,
+                final, fr, fn, reason
+            ])
