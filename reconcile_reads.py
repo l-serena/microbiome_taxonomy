@@ -63,7 +63,8 @@ with open(args.metaphlan_profile) as fh:
             continue
         p = l.rstrip("\n").split("\t")
         if len(p) >= 2 and p[0] != "clade_name":
-            clade2taxid[p[0]] = p[1].split("|")[-1]
+            ids = [x for x in p[1].split("|") if x]
+            clade2taxid[p[0]] = ids[-1] if ids else ""
 
 # marker_info: marker -> full lineage string from dict["taxon"]
 marker2clade = {}
