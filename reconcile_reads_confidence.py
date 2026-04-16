@@ -217,7 +217,7 @@ with open(args.out, "w", newline="") as out:
 
             w.writerow([
                 rid,
-                raw_taxid, raw_rank, raw_name, f"{conf:.6f}",
+                raw_taxid, raw_rank, raw_name, "{:.6f}".format(conf),
                 k_taxid, k_rank, k_name,
                 "yes" if meta_taxid else "no", meta_taxid, meta_rank, meta_name,
                 final, final_rank, final_name, reason
