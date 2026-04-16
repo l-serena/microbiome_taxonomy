@@ -68,8 +68,8 @@ def main():
             max_length=args.max_length,
         )
 
-    train_ds = train_ds.map(tokenize, batched=True)
-    test_ds = test_ds.map(tokenize, batched=True)
+    train_ds = train_ds.map(tokenize, batched=True, num_proc=4)
+    test_ds = test_ds.map(tokenize, batched=True, num_proc=4)
 
     acc = evaluate.load("accuracy")
     f1 = evaluate.load("f1")
@@ -98,6 +98,7 @@ def main():
         metric_for_best_model="macro_f1",
         greater_is_better=True,
         fp16=False,
+        dataloader_num_workers=4,
         report_to="none",
     )
 
