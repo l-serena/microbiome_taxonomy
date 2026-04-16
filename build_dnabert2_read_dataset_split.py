@@ -21,28 +21,14 @@ def norm_read_id(x):
         x = x[:-2]
     return x
 
-def read_fastq_sequences(path):
-    seqs = {}
-    with gzip.open(path, "rt") as fh:
-        while True:
-            h = fh.readline()
-            if not h:
-                break
-            s = fh.readline().strip()
-            fh.readline()
-            fh.readline()
-            seqs[norm_read_id(h)] = s
-    return seqs
-
 def load_sample_labels(final_tsv):
     labels = {}
     with open(final_tsv) as fh:
         r = csv.reader(fh, delimiter="\t")
-        header = next(r, None)
+        next(r, None)
         for row in r:
             if len(row) < 9:
                 continue
-
             read_id = norm_read_id(row[0])
             final_taxid = str(row[6]).strip()
             final_rank = row[7].strip()
@@ -51,67 +37,76 @@ def load_sample_labels(final_tsv):
             if not final_taxid or final_taxid == "0":
                 continue
 
-            labels[read_id] = {
-                "taxid": final_taxid,
-                "rank": final_rank,
-                "name": final_name,
-            }
+            labels[read_id] = (final_taxid, final_rank, final_name)
     return labels
+
+def stream_fastq_to_csv(sample, fastq_path, labels, writer):
+    matched = 0
+    with gzip.open(fastq_path, "rt") as fh:
+        while True:
+            h = fh.readline()
+            if not h:
+                break
+            seq = fh.readline().strip()
+            fh.readline()
+            fh.readline()
+
+            rid = norm_read_id(h)
+            if rid in labels:
+                taxid, rank, name = labels[rid]
+                writer.writerow([sample, rid, seq, taxid, rank, name])
+                matched += 1
+    return matched
 
 def main():
     sample_dirs = sorted([d for d in OUTPUTS.iterdir() if d.is_dir()])[:10]
     if not sample_dirs:
         raise ValueError("No sample directories found in ~/scratch/outputs")
 
-    rows = []
+    combined_csv = str(OUT_PREFIX) + ".csv"
+    train_csv = str(OUT_PREFIX) + ".train.csv"
+    test_csv = str(OUT_PREFIX) + ".test.csv"
 
-    for sample_dir in sample_dirs:
-        sample = sample_dir.name
-        final_tsv = sample_dir / "final_per_read.tsv"
+    total_rows = 0
+    with open(combined_csv, "w", newline="") as out:
+        w = csv.writer(out)
+        w.writerow(["sample", "read_id", "sequence", "label_taxid", "label_rank", "label_name"])
 
-        if not final_tsv.exists():
-            print("skip missing final_per_read:", sample)
-            continue
+        for sample_dir in sample_dirs:
+            sample = sample_dir.name
+            final_tsv = sample_dir / "final_per_read.tsv"
 
-        labels = load_sample_labels(final_tsv)
-        if not labels:
-            print("skip no usable labels:", sample)
-            continue
+            if not final_tsv.exists():
+                print("skip missing final_per_read:", sample, flush=True)
+                continue
 
-        fq1 = DEHOST / "{}_dehost_1.fastq.gz".format(sample)
-        fq2 = DEHOST / "{}_dehost_2.fastq.gz".format(sample)
-        fqse = DEHOST / "{}_dehost.fastq.gz".format(sample)
+            labels = load_sample_labels(final_tsv)
+            if not labels:
+                print("skip no labels:", sample, flush=True)
+                continue
 
-        seqs = {}
-        if fq1.exists():
-            seqs.update(read_fastq_sequences(fq1))
-        if fq2.exists():
-            seqs.update(read_fastq_sequences(fq2))
-        if fqse.exists():
-            seqs.update(read_fastq_sequences(fqse))
+            fq1 = DEHOST / "{}_dehost_1.fastq.gz".format(sample)
+            fq2 = DEHOST / "{}_dehost_2.fastq.gz".format(sample)
+            fqse = DEHOST / "{}_dehost.fastq.gz".format(sample)
 
-        matched = 0
-        for rid, lab in labels.items():
-            if rid in seqs:
-                rows.append({
-                    "sample": sample,
-                    "read_id": rid,
-                    "sequence": seqs[rid],
-                    "label_taxid": lab["taxid"],
-                    "label_rank": lab["rank"],
-                    "label_name": lab["name"],
-                })
-                matched += 1
+            matched = 0
+            if fq1.exists():
+                matched += stream_fastq_to_csv(sample, fq1, labels, w)
+            if fq2.exists():
+                matched += stream_fastq_to_csv(sample, fq2, labels, w)
+            if fqse.exists():
+                matched += stream_fastq_to_csv(sample, fqse, labels, w)
 
-        print("{} labels={} matched_sequences={}".format(sample, len(labels), matched))
+            total_rows += matched
+            print("{} labels={} matched_sequences={}".format(sample, len(labels), matched), flush=True)
 
-    df = pd.DataFrame(rows)
-    if len(df) == 0:
-        raise ValueError("No matched read/label pairs found")
+    print("wrote combined:", combined_csv, "rows=", total_rows, flush=True)
 
-    # Need at least 2 per class for stratified split
+    df = pd.read_csv(combined_csv)
+
     counts = df["label_taxid"].value_counts()
-    keep = set(counts[counts >= 2].index)
+    keep = set(counts[counts >= 2].index.astype(str))
+    df["label_taxid"] = df["label_taxid"].astype(str)
     df = df[df["label_taxid"].isin(keep)].copy()
 
     if len(df) == 0:
@@ -124,14 +119,11 @@ def main():
         stratify=df["label_taxid"],
     )
 
-    train_path = str(OUT_PREFIX) + ".train.csv"
-    test_path = str(OUT_PREFIX) + ".test.csv"
+    train_df.to_csv(train_csv, index=False)
+    test_df.to_csv(test_csv, index=False)
 
-    train_df.to_csv(train_path, index=False)
-    test_df.to_csv(test_path, index=False)
-
-    print("wrote {} rows to {}".format(len(train_df), train_path))
-    print("wrote {} rows to {}".format(len(test_df), test_path))
+    print("wrote train:", train_csv, len(train_df), flush=True)
+    print("wrote test:", test_csv, len(test_df), flush=True)
 
 if __name__ == "__main__":
     main()
