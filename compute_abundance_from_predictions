@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+import argparse
+from collections import defaultdict
+
+import pandas as pd
+
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--predictions", required=True, help="TSV/CSV with pred_label_id or pred_taxid")
+    ap.add_argument("--label_map", required=True, help="label_map.tsv (label_id -> taxid)")
+    ap.add_argument("--taxonomy", required=True, help="taxonomy.tsv (taxid -> parent)")
+    ap.add_argument("--output", required=True, help="output TSV")
+    return ap.parse_args()
+
+
+def load_label_map(path):
+    df = pd.read_csv(path, sep="\t")
+    return dict(zip(df["label_id"], df["label_taxid"].astype(str)))
+
+
+def load_taxonomy(path):
+    df = pd.read_csv(path, sep="\t")
+    parent = dict(zip(df["taxid"].astype(str), df["parent_taxid"].astype(str)))
+    rank = dict(zip(df["taxid"].astype(str), df["rank"]))
+    name = dict(zip(df["taxid"].astype(str), df.get("name", df["taxid"])))
+    return parent, rank, name
+
+
+def main():
+    args = parse_args()
+
+    df = pd.read_csv(args.predictions, sep=None, engine="python")
+
+    label_map = load_label_map(args.label_map)
+    parent, rank, name = load_taxonomy(args.taxonomy)
+
+    # --- get predicted taxids ---
+    if "pred_taxid" in df.columns:
+        pred_taxids = df["pred_taxid"].astype(str).tolist()
+    elif "pred_label_id" in df.columns:
+        pred_taxids = [label_map[int(x)] for x in df["pred_label_id"]]
+    else:
+        raise ValueError("Need column 'pred_taxid' or 'pred_label_id'")
+
+    total_reads = len(pred_taxids)
+
+    direct = defaultdict(int)
+    cumulative = defaultdict(int)
+
+    # --- roll up ---
+    for taxid in pred_taxids:
+        direct[taxid] += 1
+
+        cur = taxid
+        visited = set()
+        while cur and cur not in visited:
+            cumulative[cur] += 1
+            visited.add(cur)
+
+            p = parent.get(cur)
+            if p is None or p == cur:
+                break
+            cur = p
+
+    # --- build output ---
+    rows = []
+    for taxid in cumulative:
+        rows.append({
+            "taxid": taxid,
+            "name": name.get(taxid, taxid),
+            "rank": rank.get(taxid, "unknown"),
+            "direct_reads": direct.get(taxid, 0),
+            "cumulative_reads": cumulative[taxid],
+            "abundance": cumulative[taxid] / total_reads
+        })
+
+    out = pd.DataFrame(rows)
+    out = out.sort_values("cumulative_reads", ascending=False)
+
+    out.to_csv(args.output, sep="\t", index=False)
+
+    print(f"Wrote {args.output}")
+    print(f"Total reads: {total_reads}")
+
+
+if __name__ == "__main__":
+    main()
