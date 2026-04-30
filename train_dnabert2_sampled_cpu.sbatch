@@ -25,9 +25,11 @@ python ~/microbiome_taxonomy/train_dnabert2_read_classifier_split.py \
   --train_csv ~/scratch/dnabert2_reads_10samples.sampled_200k.train.csv \
   --test_csv ~/scratch/dnabert2_reads_10samples.sampled_200k.test.csv \
   --output_dir ~/scratch/dnabert2_read_model_200k \
-  --epochs 3 \
+  --epochs 1 \
   --batch_size 8 \
-  --min_class_count 20
+  --min_class_count 20 \
+  --eval_steps 1000 \
+  --save_steps 1000
 
 echo "=== DONE ==="
 date
