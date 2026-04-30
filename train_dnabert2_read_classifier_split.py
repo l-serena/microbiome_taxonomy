@@ -13,6 +13,8 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+from transformers.trainer_utils import get_last_checkpoint
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -24,7 +26,11 @@ def main():
     ap.add_argument("--min_class_count", type=int, default=20)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch_size", type=int, default=8)
+    ap.add_argument("--eval_steps", type=int, default=1000)
+    ap.add_argument("--save_steps", type=int, default=1000)
     args = ap.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
 
     train_df = pd.read_csv(args.train_csv)
     test_df = pd.read_csv(args.test_csv)
@@ -47,6 +53,10 @@ def main():
 
     train_df["label"] = train_df["label_taxid"].map(label2id)
     test_df["label"] = test_df["label_taxid"].map(label2id)
+
+    print(f"Training rows after filter: {len(train_df)}")
+    print(f"Test rows after filter: {len(test_df)}")
+    print(f"Number of classes: {len(labels)}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     model = AutoModelForSequenceClassification.from_pretrained(
@@ -75,17 +85,28 @@ def main():
     f1 = evaluate.load("f1")
 
     def compute_metrics(eval_pred):
-        logits, labels = eval_pred
-        preds = np.argmax(logits, axis=-1)
+        predictions, labels = eval_pred
+
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+
+        preds = np.argmax(predictions, axis=-1)
+
         return {
             "accuracy": acc.compute(predictions=preds, references=labels)["accuracy"],
-            "macro_f1": f1.compute(predictions=preds, references=labels, average="macro")["f1"],
+            "macro_f1": f1.compute(
+                predictions=preds,
+                references=labels,
+                average="macro",
+            )["f1"],
         }
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
+        evaluation_strategy="steps",
+        eval_steps=args.eval_steps,
+        save_strategy="steps",
+        save_steps=args.save_steps,
         logging_strategy="steps",
         logging_steps=100,
         learning_rate=2e-5,
@@ -112,7 +133,14 @@ def main():
         compute_metrics=compute_metrics,
     )
 
-    trainer.train()
+    last_checkpoint = get_last_checkpoint(args.output_dir)
+    if last_checkpoint is not None:
+        print(f"Resuming from checkpoint: {last_checkpoint}")
+    else:
+        print("No checkpoint found; starting fresh.")
+
+    trainer.train(resume_from_checkpoint=last_checkpoint)
+
     metrics = trainer.evaluate()
     print(metrics)
 
@@ -122,11 +150,12 @@ def main():
     with open(os.path.join(args.output_dir, "label_map.tsv"), "w") as out:
         out.write("label_id\tlabel_taxid\n")
         for i, lab in id2label.items():
-            out.write("{}\t{}\n".format(i, lab))
+            out.write(f"{i}\t{lab}\n")
 
     with open(os.path.join(args.output_dir, "test_metrics.tsv"), "w") as out:
         for k, v in sorted(metrics.items()):
-            out.write("{}\t{}\n".format(k, v))
+            out.write(f"{k}\t{v}\n")
+
 
 if __name__ == "__main__":
     main()
