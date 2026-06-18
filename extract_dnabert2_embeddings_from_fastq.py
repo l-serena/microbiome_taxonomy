@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-import argparse, gzip, os
+import argparse
+import gzip
+import os
 from pathlib import Path
 
 import numpy as np
@@ -16,19 +18,34 @@ def read_fastq(path, max_reads=None):
             header = f.readline().strip()
             if not header:
                 break
+
             seq = f.readline().strip()
             f.readline()
             f.readline()
+
             read_id = header.split()[0].lstrip("@")
             yield read_id, seq
+
             n += 1
-            if max_reads and n >= max_reads:
+            if max_reads is not None and n >= max_reads:
                 break
 
 
 def mean_pool(last_hidden_state, attention_mask):
     mask = attention_mask.unsqueeze(-1).float()
-    return (last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+    summed = (last_hidden_state * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp(min=1e-9)
+    return summed / counts
+
+
+def get_hidden_state(model_output):
+    if hasattr(model_output, "last_hidden_state"):
+        return model_output.last_hidden_state
+
+    if isinstance(model_output, (tuple, list)):
+        return model_output[0]
+
+    raise TypeError(f"Unexpected model output type: {type(model_output)}")
 
 
 def main():
@@ -50,7 +67,6 @@ def main():
     r2 = fastq_dir / f"{args.sample}_2.fastq.gz"
     se = fastq_dir / f"{args.sample}.fastq.gz"
 
-    files = []
     if r1.exists() and r2.exists():
         files = [r1, r2]
     elif se.exists():
@@ -58,14 +74,22 @@ def main():
     else:
         raise FileNotFoundError(f"No FASTQ found for {args.sample} in {fastq_dir}")
 
+    print(f"Sample: {args.sample}")
+    print(f"FASTQ files: {[str(x) for x in files]}")
+    print(f"Loading model: {args.model_name}")
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     model = AutoModel.from_pretrained(args.model_name, trust_remote_code=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+
     model.to(device)
     model.eval()
 
-    read_ids, seqs, mates = [], [], []
+    read_ids = []
+    seqs = []
+    mates = []
 
     for fq in files:
         mate = "SE"
@@ -79,10 +103,14 @@ def main():
             seqs.append(seq)
             mates.append(mate)
 
+    if len(seqs) == 0:
+        raise ValueError(f"No reads found for {args.sample}")
+
     all_emb = []
 
     for start in range(0, len(seqs), args.batch_size):
         batch = seqs[start:start + args.batch_size]
+
         toks = tokenizer(
             batch,
             truncation=True,
@@ -94,7 +122,8 @@ def main():
 
         with torch.no_grad():
             out = model(**toks, return_dict=True)
-            emb = mean_pool(out.last_hidden_state, toks["attention_mask"])
+            hidden = get_hidden_state(out)
+            emb = mean_pool(hidden, toks["attention_mask"])
 
         all_emb.append(emb.cpu().numpy())
 
@@ -113,7 +142,8 @@ def main():
     np.save(outdir / "embeddings.npy", embeddings)
     metadata.to_csv(outdir / "read_metadata.tsv", sep="\t", index=False)
 
-    print(f"Saved {outdir / 'embeddings.npy'} {embeddings.shape}")
+    print(f"Saved {outdir / 'embeddings.npy'}")
+    print(f"Shape: {embeddings.shape}")
     print(f"Saved {outdir / 'read_metadata.tsv'}")
 
 
