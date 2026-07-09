@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-source /apps/lib-osver/miniforge3/etc/profile.d/conda.sh
+source /apps/software/Miniforge3/24.11.3-0/etc/profile.d/conda.sh
 conda activate dnabert
 
 IDS_FILE="${1:?Usage: sbatch --array=0-N run_dnabert_embeddings_array.sbatch ids.txt}"
@@ -18,7 +18,8 @@ ACC=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$IDS_FILE" | tr -d '[:space:]')
 
 python ~/microbiome_taxonomy/extract_dnabert2_embeddings_from_fastq.py \
   --sample "$ACC" \
-  --fastq_dir ~/scratch/fastq \
+  --fastq_dir ~/scratch/dehost_fastq \
+  --dehosted \
   --outdir ~/scratch/dnabert2_embeddings/"$ACC" \
   --batch_size 8 \
   --max_length 250
